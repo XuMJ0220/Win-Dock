@@ -1,5 +1,5 @@
 ﻿# Win-Dock 显示原型，可丢弃。用 Windows PowerShell 运行本文件。
-# 测试 Windows 工作区、底边唤出和全屏恢复。
+# 测试 Windows 置顶浮层、底边唤出和全屏显示。
 
 [CmdletBinding()]
 param([string]$DiagnosticFile)
@@ -24,11 +24,11 @@ using Microsoft.Win32;
 
 internal static class Desktop
 {
-    public const uint New = 0, Remove = 1, QueryPosition = 2, SetPosition = 3;
     public const uint GetState = 4, GetTaskbarPosition = 5, GetAutoHideBar = 11;
     public const uint Bottom = 3;
     public const int ToolWindow = 0x80, NoActivate = 0x08000000;
-    public const int SetWithoutActivation = 0x0010;
+    public const uint KeepSize = 0x0001, KeepPosition = 0x0002, SetWithoutActivation = 0x0010;
+    public static readonly IntPtr Topmost = new IntPtr(-1);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect
@@ -67,10 +67,10 @@ internal static class Desktop
         public uint Flags;
     }
 
-    public static Bar BarAt(IntPtr window, Rectangle bounds)
+    public static Bar BarAt(Rectangle bounds)
     {
         return new Bar {
-            Size = Marshal.SizeOf(typeof(Bar)), Window = window,
+            Size = Marshal.SizeOf(typeof(Bar)),
             Edge = Bottom, Position = new Rect(bounds)
         };
     }
@@ -87,8 +87,6 @@ internal static class Desktop
     public static extern UIntPtr SHAppBarMessage(uint message, ref Bar bar);
     [DllImport("shell32.dll")]
     public static extern int SHQueryUserNotificationState(out int state);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern uint RegisterWindowMessage(string name);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetMonitorInfo(IntPtr monitor, ref Monitor info);
     [DllImport("user32.dll")]
@@ -111,76 +109,6 @@ internal static class Desktop
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(
         IntPtr window, int attribute, out Rect bounds, int size);
-}
-
-// The Shell reserves a rectangle across the screen. The visible dock is a separate window.
-internal sealed class WorkAreaReservation : NativeWindow, IDisposable
-{
-    private readonly uint callback = Desktop.RegisterWindowMessage("WinDock.DisplayPrototype.AppBar");
-    private Rectangle applied, screen;
-    private int requestedTop;
-    private bool dirty = true;
-    public bool Registered { get; private set; }
-
-    public WorkAreaReservation()
-    {
-        CreateHandle(new CreateParams {
-            Caption = "Win-Dock Workspace Prototype",
-            Style = unchecked((int)0x80000000),
-            ExStyle = Desktop.ToolWindow | Desktop.NoActivate
-        });
-    }
-
-    public int Reserve(Rectangle monitor, int desiredTop, int height)
-    {
-        var bar = Desktop.BarAt(Handle, monitor);
-        if (!Registered)
-        {
-            bar.Callback = callback;
-            Registered = Desktop.SHAppBarMessage(Desktop.New, ref bar) != UIntPtr.Zero;
-            if (!Registered) return desiredTop;
-        }
-        if (!dirty && screen == monitor && requestedTop == desiredTop && !applied.IsEmpty)
-            return applied.Top;
-
-        dirty = false;
-        screen = monitor;
-        requestedTop = desiredTop;
-        Desktop.SHAppBarMessage(Desktop.QueryPosition, ref bar);
-        bar.Position.Top = Math.Min(desiredTop, bar.Position.Bottom - height);
-        if (bar.Position.Bounds != applied)
-        {
-            var result = Desktop.SHAppBarMessage(Desktop.SetPosition, ref bar);
-            applied = result == UIntPtr.Zero ? Rectangle.Empty : bar.Position.Bounds;
-            if (!applied.IsEmpty)
-                Desktop.SetWindowPos(Handle, IntPtr.Zero, applied.X, applied.Y, applied.Width,
-                    applied.Height, Desktop.SetWithoutActivation | 0x0004);
-        }
-        return applied.IsEmpty ? desiredTop : applied.Top;
-    }
-
-    public void Release()
-    {
-        if (!Registered) return;
-        var bar = Desktop.BarAt(Handle, Rectangle.Empty);
-        Desktop.SHAppBarMessage(Desktop.Remove, ref bar);
-        Registered = false;
-        applied = Rectangle.Empty;
-        dirty = true;
-    }
-
-    protected override void WndProc(ref Message message)
-    {
-        // ABN_STATECHANGE and ABN_POSCHANGED can change the approved rectangle.
-        if (message.Msg == callback && message.WParam.ToInt32() <= 1) dirty = true;
-        base.WndProc(ref message);
-    }
-
-    public void Dispose()
-    {
-        Release();
-        DestroyHandle();
-    }
 }
 
 internal sealed class DockSurface : Form
@@ -208,6 +136,12 @@ internal sealed class DockSurface : Form
             sample.Text = "示例应用 · 点击 " + Clicks;
         };
         Controls.Add(sample);
+    }
+
+    public void RaiseWithoutActivation()
+    {
+        Desktop.SetWindowPos(Handle, Desktop.Topmost, 0, 0, 0, 0,
+            Desktop.KeepSize | Desktop.KeepPosition | Desktop.SetWithoutActivation);
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -244,7 +178,6 @@ internal sealed class DisplayPanel : Form
         ScrollBars = ScrollBars.Vertical, AccessibleName = "实测状态"
     };
     private readonly DockSurface dock;
-    private readonly WorkAreaReservation reservation;
     private readonly IntPtr monitor;
     private readonly Timer timer = new Timer { Interval = 40 };
     private readonly Stopwatch clock = Stopwatch.StartNew();
@@ -275,7 +208,7 @@ internal sealed class DisplayPanel : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.Controls.Add(new Label {
             AutoSize = true, Margin = new Padding(3, 0, 3, 12),
-            Text = "验证最大化让位、底边唤出和全屏恢复。"
+            Text = "验证程序坞浮在窗口上方，窗口可以铺满屏幕。"
         }, 0, 0);
         var controls = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
         zone.Items.AddRange(new object[] { "底边中段", "整条底边" });
@@ -288,7 +221,7 @@ internal sealed class DisplayPanel : Form
         var open = new Button { Text = "打开测试窗口", AutoSize = true };
         open.Click += delegate { OpenSample(); };
         steps.Controls.Add(open);
-        steps.Controls.Add(Prompt("最大化后比较工作区，再用 F11 进入或退出全屏。"));
+        steps.Controls.Add(Prompt("最大化或按 F11，观察窗口底边和程序坞。"));
         layout.Controls.Add(steps, 0, 2);
         layout.Controls.Add(status, 0, 3);
         Controls.Add(layout);
@@ -296,7 +229,6 @@ internal sealed class DisplayPanel : Form
         var primary = Screen.PrimaryScreen.Bounds;
         dock = new DockSurface(primary.Location);
         monitor = Desktop.MonitorFromWindow(dock.Handle, 1);
-        reservation = new WorkAreaReservation();
         dpi = Math.Max(96, (int)Desktop.GetDpiForWindow(dock.Handle));
         autoHide.CheckedChanged += delegate { RefreshDesktop(); };
         zone.SelectedIndexChanged += delegate { enteredAt = -1; RefreshDesktop(); };
@@ -318,7 +250,7 @@ internal sealed class DisplayPanel : Form
 
     private void ReadShell(Rectangle screen)
     {
-        var bar = Desktop.BarAt(IntPtr.Zero, screen);
+        var bar = Desktop.BarAt(screen);
         shellAutoHide = (Desktop.SHAppBarMessage(Desktop.GetState, ref bar).ToUInt64() & 1) != 0;
         if (Desktop.SHAppBarMessage(Desktop.GetTaskbarPosition, ref bar) != UIntPtr.Zero)
         {
@@ -331,7 +263,7 @@ internal sealed class DisplayPanel : Form
                 insetSource = "Shell 矩形";
             }
         }
-        bar = Desktop.BarAt(IntPtr.Zero, screen);
+        bar = Desktop.BarAt(screen);
         shellBar = new IntPtr(unchecked((long)Desktop.SHAppBarMessage(
             Desktop.GetAutoHideBar, ref bar).ToUInt64()));
         if (taskbarInset == 0)
@@ -381,8 +313,10 @@ internal sealed class DisplayPanel : Form
             ReadShell(screen);
             nextShellRead = now + 250;
         }
+        IntPtr previousFullscreenWindow = fullscreenWindow;
         Scene scene = DetectScene(screen);
-        if (scene != previousScene || autoHide.Checked != previousAutoHide)
+        bool sceneChanged = scene != previousScene;
+        if (sceneChanged || autoHide.Checked != previousAutoHide)
         {
             temporary = false;
             enteredAt = -1;
@@ -392,9 +326,7 @@ internal sealed class DisplayPanel : Form
 
         int width = Pixels(310), height = Pixels(52);
         int top = screen.Bottom - taskbarInset - Pixels(8) - height;
-        bool permanent = scene == Scene.Desktop && !autoHide.Checked;
-        if (permanent) top = reservation.Reserve(screen, top, height);
-        else reservation.Release();
+        bool mayShow = scene != Scene.Exclusive;
 
         var bounds = new Rectangle(screen.Left + (screen.Width - width) / 2, top, width, height);
         var horizontal = zone.SelectedIndex == 0 ? Rectangle.Inflate(bounds, Pixels(18), 0) : screen;
@@ -403,7 +335,7 @@ internal sealed class DisplayPanel : Form
         var pointer = Cursor.Position;
         bool onEdge = edge.Contains(pointer);
 
-        if (!permanent && scene != Scene.Exclusive)
+        if (mayShow && autoHide.Checked)
         {
             if (onEdge && enteredAt < 0) enteredAt = now;
             if (!onEdge) enteredAt = -1;
@@ -417,9 +349,19 @@ internal sealed class DisplayPanel : Form
         }
 
         if (dock.Bounds != bounds) dock.Bounds = bounds;
-        bool show = permanent || (temporary && scene != Scene.Exclusive);
-        if (show && !dock.Visible) dock.Show();
-        if (!show && dock.Visible) dock.Hide();
+        bool show = mayShow && (!autoHide.Checked || temporary);
+        if (show)
+        {
+            bool newlyVisible = !dock.Visible;
+            if (newlyVisible) dock.Show();
+            if (newlyVisible || (scene == Scene.Fullscreen &&
+                (sceneChanged || fullscreenWindow != previousFullscreenWindow)))
+                dock.RaiseWithoutActivation();
+        }
+        else if (dock.Visible)
+        {
+            dock.Hide();
+        }
         bool nearEdge = screen.Contains(pointer) && pointer.Y >= edge.Top;
         ShowState(scene, bounds, onEdge, nearEdge, screen);
     }
@@ -436,14 +378,14 @@ internal sealed class DisplayPanel : Form
             shellVisibility = shellFrame.Top <= screen.Bottom - taskbarInset / 2 ? "展开" : "收起";
         string summary = string.Format(
             "显示模式  {0}    场景  {1}    程序坞  {2}\r\n" +
-            "工作区底边  {3}px    AppBar  {4}\r\n" +
-            "任务栏自动隐藏  {5}    任务栏上沿  {6}px（{7}）\r\n" +
-            "触发范围  {8}    停留 {9} ms    收起 {10} ms    鼠标  {11}\r\n" +
-            "程序坞  {12},{13}  {14}×{15} px    点中  {16} 次\r\n" +
-            "主显示器  {17}×{18} px    缩放  {19}%    Windows  {20}\r\n" +
-            "系统任务栏  {21}",
+            "工作区底边  {3}px    置顶浮层\r\n" +
+            "任务栏自动隐藏  {4}    任务栏上沿  {5}px（{6}）\r\n" +
+            "触发范围  {7}    停留 {8} ms    收起 {9} ms    鼠标  {10}\r\n" +
+            "程序坞  {11},{12}  {13}×{14} px    点中  {15} 次\r\n" +
+            "主显示器  {16}×{17} px    缩放  {18}%    Windows  {19}\r\n" +
+            "系统任务栏  {20}",
             autoHide.Checked ? "自动隐藏" : "常驻", sceneText, dock.Visible ? "可见" : "收起",
-            work.Bottom, reservation.Registered ? "已注册" : "已释放",
+            work.Bottom,
             shellAutoHide ? "开启" : "关闭", screen.Bottom - taskbarInset, insetSource,
             zone.Text, dwell.Value, grace.Value, pointerText,
             bounds.X, bounds.Y, bounds.Width, bounds.Height, dock.Clicks,
@@ -476,7 +418,7 @@ internal sealed class DisplayPanel : Form
         var fullScreen = new Button { Text = "全屏／退出全屏", AutoSize = true };
         var caption = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         var bottomControl = new Label {
-            Text = "窗口底部 · 对照程序坞是否让位", Dock = DockStyle.Bottom,
+            Text = "窗口内容的真实底边", Dock = DockStyle.Bottom,
             Height = Pixels(35), TextAlign = ContentAlignment.MiddleCenter,
             BackColor = Color.FromArgb(191, 226, 219)
         };
@@ -524,7 +466,6 @@ internal sealed class DisplayPanel : Form
     protected override void OnFormClosed(FormClosedEventArgs eventArgs)
     {
         timer.Dispose();
-        reservation.Dispose();
         dock.Dispose();
         if (sample != null) sample.Dispose();
         output.WriteLine("退出时工作区底边 " + Desktop.ReadMonitor(monitor).Work.Bounds.Bottom + " px");
