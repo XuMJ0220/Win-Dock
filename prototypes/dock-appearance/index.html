@@ -1,0 +1,75 @@
+<!doctype html>
+<!-- Throwaway UI prototype. Compare three dock layouts and hover reactions on this route with ?variant=A, B, or C. -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>程序坞外观与悬停 · Win-Dock 原型</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="workspace">
+    <header class="heading">
+      <div>
+        <p class="project-name">Win-Dock 原型</p>
+        <h1>程序坞外观与悬停</h1>
+      </div>
+      <label class="motion-control">
+        <input type="checkbox" id="magnify" checked>
+        <span>悬停放大</span>
+      </label>
+    </header>
+
+    <section class="test-bench" aria-label="桌面预览">
+      <div class="test-controls">
+        <fieldset class="scene-control" aria-label="预览场景">
+          <label><input type="radio" name="scene" value="desktop" checked><span>桌面</span></label>
+          <label><input type="radio" name="scene" value="maximized"><span>窗口最大化</span></label>
+        </fieldset>
+        <label class="hide-control"><input type="checkbox" id="auto-hide"><span>自动隐藏</span></label>
+      </div>
+
+      <div class="desktop" id="desktop" data-scene="desktop">
+        <div class="wallpaper" aria-hidden="true"></div>
+        <article class="preview-window" id="preview-window" aria-label="示例窗口">
+          <header class="window-title-bar">
+            <span id="preview-window-icon"></span>
+            <span id="preview-window-title"></span>
+            <div class="window-controls">
+              <button type="button" id="minimize-window" aria-label="最小化示例窗口" title="最小化">−</button>
+              <button type="button" id="close-window" aria-label="关闭示例窗口" title="关闭">×</button>
+            </div>
+          </header>
+          <div class="window-content">
+            <h2 id="preview-document-title"></h2>
+            <div id="preview-document-lines"></div>
+          </div>
+        </article>
+
+        <div class="dock-anchor" id="dock-anchor" data-visible="true">
+          <section class="window-picker" id="window-picker" aria-label="选择窗口" hidden>
+            <p class="picker-title" id="picker-title"></p>
+            <div id="picker-items"></div>
+          </section>
+          <nav class="dock-layout" id="dock" aria-label="固定应用"></nav>
+        </div>
+        <div class="screen-edge" id="screen-edge" aria-hidden="true"></div>
+      </div>
+
+      <footer class="test-state">
+        <span id="dock-state"></span>
+        <span class="result" id="result" role="status">移动指针对比悬停效果，点击 Edge 试用窗口选择。</span>
+      </footer>
+    </section>
+  </main>
+
+  <nav class="variant-switcher" aria-label="切换原型版本">
+    <button type="button" id="previous-variant" aria-label="上一种布局" title="上一种布局（←）">←</button>
+    <span class="variant-key" id="variant-key" aria-hidden="true">A</span>
+    <span class="variant-name" id="variant-name" aria-live="polite"></span>
+    <button type="button" id="next-variant" aria-label="下一种布局" title="下一种布局（→）">→</button>
+  </nav>
+
+  <script src="./prototype.js"></script>
+</body>
+</html>
