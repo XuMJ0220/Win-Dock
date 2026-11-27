@@ -19,6 +19,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -160,6 +161,12 @@ internal sealed class DockSurface : Form
 internal sealed class DisplayPanel : Form
 {
     private enum Scene { Desktop, Fullscreen, Exclusive }
+    private struct ShellState
+    {
+        public bool AutoHide;
+        public int BottomInset;
+        public IntPtr AutoHideBar;
+    }
 
     private readonly CheckBox autoHide = new CheckBox { Text = "自动隐藏", AutoSize = true };
     private readonly ComboBox zone = new ComboBox {
@@ -187,9 +194,11 @@ internal sealed class DisplayPanel : Form
     private Scene previousScene;
     private IntPtr fullscreenWindow, shellBar;
     private int taskbarInset, dpi;
-    private string insetSource = "";
+    private string insetSource = "估计 48 DIP";
     private long nextShellRead, enteredAt = -1, lastOnPath;
-    private bool shellAutoHide, temporary, previousAutoHide;
+    private Task<ShellState> shellRead;
+    private bool? shellAutoHide;
+    private bool temporary, previousAutoHide;
 
     public DisplayPanel(string windowsVersion, TextWriter diagnosticOutput)
     {
@@ -212,7 +221,7 @@ internal sealed class DisplayPanel : Form
         }, 0, 0);
         var controls = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
         zone.Items.AddRange(new object[] { "底边中段", "整条底边" });
-        zone.SelectedIndex = 0;
+        zone.SelectedIndex = 1;
         controls.Controls.AddRange(new Control[] {
             autoHide, zone, Prompt("停留"), dwell, Prompt("收起"), grace, Prompt("毫秒")
         });
@@ -230,6 +239,7 @@ internal sealed class DisplayPanel : Form
         dock = new DockSurface(primary.Location);
         monitor = Desktop.MonitorFromWindow(dock.Handle, 1);
         dpi = Math.Max(96, (int)Desktop.GetDpiForWindow(dock.Handle));
+        taskbarInset = Pixels(48);
         autoHide.CheckedChanged += delegate { RefreshDesktop(); };
         zone.SelectedIndexChanged += delegate { enteredAt = -1; RefreshDesktop(); };
         dwell.ValueChanged += delegate { RefreshDesktop(); };
@@ -248,28 +258,56 @@ internal sealed class DisplayPanel : Form
         return (at96Dpi * dpi + 48) / 96;
     }
 
-    private void ReadShell(Rectangle screen)
+    private static ShellState ReadShell(Rectangle screen, int minInset, int maxInset)
     {
-        var bar = Desktop.BarAt(screen);
-        shellAutoHide = (Desktop.SHAppBarMessage(Desktop.GetState, ref bar).ToUInt64() & 1) != 0;
-        if (Desktop.SHAppBarMessage(Desktop.GetTaskbarPosition, ref bar) != UIntPtr.Zero)
+        IntPtr previousContext = Desktop.SetThreadDpiAwarenessContext(new IntPtr(-4));
+        try
         {
-            Rectangle position = bar.Position.Bounds;
-            int inset = screen.Bottom - position.Top;
-            if (position.Width >= screen.Width / 2 && inset >= Pixels(24) &&
-                inset <= Pixels(140) && Math.Abs(position.Bottom - screen.Bottom) <= 2)
+            var state = new ShellState();
+            var bar = Desktop.BarAt(screen);
+            state.AutoHide = (Desktop.SHAppBarMessage(Desktop.GetState, ref bar).ToUInt64() & 1) != 0;
+            if (Desktop.SHAppBarMessage(Desktop.GetTaskbarPosition, ref bar) != UIntPtr.Zero)
             {
-                taskbarInset = inset;
-                insetSource = "Shell 矩形";
+                Rectangle position = bar.Position.Bounds;
+                int inset = screen.Bottom - position.Top;
+                if (position.Width >= screen.Width / 2 && inset >= minInset &&
+                    inset <= maxInset && Math.Abs(position.Bottom - screen.Bottom) <= 2)
+                    state.BottomInset = inset;
             }
+            bar = Desktop.BarAt(screen);
+            state.AutoHideBar = new IntPtr(unchecked((long)Desktop.SHAppBarMessage(
+                Desktop.GetAutoHideBar, ref bar).ToUInt64()));
+            return state;
         }
-        bar = Desktop.BarAt(screen);
-        shellBar = new IntPtr(unchecked((long)Desktop.SHAppBarMessage(
-            Desktop.GetAutoHideBar, ref bar).ToUInt64()));
-        if (taskbarInset == 0)
+        finally
         {
-            taskbarInset = Pixels(48);
-            insetSource = "估计 48 DIP";
+            if (previousContext != IntPtr.Zero) Desktop.SetThreadDpiAwarenessContext(previousContext);
+        }
+    }
+
+    private void RefreshShell(Rectangle screen, long now)
+    {
+        if (shellRead != null && shellRead.IsCompleted)
+        {
+            if (shellRead.Status == TaskStatus.RanToCompletion)
+            {
+                ShellState state = shellRead.Result;
+                shellAutoHide = state.AutoHide;
+                shellBar = state.AutoHideBar;
+                if (state.BottomInset > 0)
+                {
+                    taskbarInset = state.BottomInset;
+                    insetSource = "Shell 矩形";
+                }
+            }
+            shellRead = null;
+        }
+        // A stalled Shell query should leave the dock responsive.
+        if (shellRead == null && now >= nextShellRead)
+        {
+            int minInset = Pixels(24), maxInset = Pixels(140);
+            shellRead = Task.Run(() => ReadShell(screen, minInset, maxInset));
+            nextShellRead = now + 250;
         }
     }
 
@@ -308,11 +346,7 @@ internal sealed class DisplayPanel : Form
     {
         Rectangle screen = Desktop.ReadMonitor(monitor).Screen.Bounds;
         long now = clock.ElapsedMilliseconds;
-        if (now >= nextShellRead)
-        {
-            ReadShell(screen);
-            nextShellRead = now + 250;
-        }
+        RefreshShell(screen, now);
         IntPtr previousFullscreenWindow = fullscreenWindow;
         Scene scene = DetectScene(screen);
         bool sceneChanged = scene != previousScene;
@@ -330,8 +364,11 @@ internal sealed class DisplayPanel : Form
         bool mayShow = scene != Scene.Exclusive;
 
         var bounds = new Rectangle(screen.Left + (screen.Width - width) / 2, top, width, height);
-        var horizontal = zone.SelectedIndex == 0 ? Rectangle.Inflate(bounds, Pixels(18), 0) : screen;
-        var edge = Rectangle.FromLTRB(horizontal.Left, screen.Bottom - Pixels(4), horizontal.Right, screen.Bottom);
+        bool wholeBottom = zone.SelectedIndex == 1;
+        var horizontal = wholeBottom ? screen : Rectangle.Inflate(bounds, Pixels(18), 0);
+        // Keep the trigger active as the pointer moves over taskbar icons.
+        int edgeHeight = wholeBottom ? Math.Max(Pixels(4), taskbarInset) : Pixels(4);
+        var edge = Rectangle.FromLTRB(horizontal.Left, screen.Bottom - edgeHeight, horizontal.Right, screen.Bottom);
         var path = Rectangle.FromLTRB(bounds.Left - Pixels(18), bounds.Top, bounds.Right + Pixels(18), screen.Bottom);
         var pointer = Cursor.Position;
         bool onEdge = edge.Contains(pointer);
@@ -373,6 +410,8 @@ internal sealed class DisplayPanel : Form
         string sceneText = scene == Scene.Desktop ? "桌面／普通窗口" :
             scene == Scene.Fullscreen ? "全屏窗口" : "Direct3D 独占全屏";
         string pointerText = onEdge ? "在触发区" : nearEdge ? "底边触发区外" : "离开底边";
+        string shellAutoHideText = shellAutoHide.HasValue ?
+            (shellAutoHide.Value ? "开启" : "关闭") : "待读取";
         Desktop.Rect shellFrame;
         string shellVisibility = "实时位置不可读";
         if (shellBar != IntPtr.Zero && Desktop.GetWindowRect(shellBar, out shellFrame))
@@ -387,7 +426,7 @@ internal sealed class DisplayPanel : Form
             "系统任务栏  {20}",
             autoHide.Checked ? "自动隐藏" : "常驻", sceneText, dock.Visible ? "可见" : "收起",
             work.Bottom,
-            shellAutoHide ? "开启" : "关闭", screen.Bottom - taskbarInset, insetSource,
+            shellAutoHideText, screen.Bottom - taskbarInset, insetSource,
             zone.Text, dwell.Value, grace.Value, pointerText,
             bounds.X, bounds.Y, bounds.Width, bounds.Height, dock.Clicks,
             screen.Width, screen.Height, (int)Math.Round(dpi * 100 / 96.0), windows, shellVisibility);
