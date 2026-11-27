@@ -316,13 +316,14 @@ internal sealed class DisplayPanel : Form
         IntPtr previousFullscreenWindow = fullscreenWindow;
         Scene scene = DetectScene(screen);
         bool sceneChanged = scene != previousScene;
-        if (sceneChanged || autoHide.Checked != previousAutoHide)
+        bool exclusiveChanged = (scene == Scene.Exclusive) != (previousScene == Scene.Exclusive);
+        if (exclusiveChanged || autoHide.Checked != previousAutoHide)
         {
             temporary = false;
             enteredAt = -1;
-            previousScene = scene;
-            previousAutoHide = autoHide.Checked;
         }
+        previousScene = scene;
+        previousAutoHide = autoHide.Checked;
 
         int width = Pixels(310), height = Pixels(52);
         int top = screen.Bottom - taskbarInset - Pixels(8) - height;
